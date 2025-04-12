@@ -1,0 +1,128 @@
+---
+title: "datafest"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(caret)
+```
+
+```{r}
+leases <- read_csv("Leases_WithDates_FixedNA.csv")
+```
+
+```{r}
+summary(leases)
+```
+
+```{r}
+occupancy <- read.csv("MajorMarketOccupancyData-revised.csv")
+corp_rates <- read.csv("CorpRates.csv")
+qual <- read.csv("High_Qual_Percentage.csv")
+```
+
+```{r}
+names(corp_rates) <- tolower(names(corp_rates))
+names(qual) <- tolower(names(qual))
+
+corp_rates$state <- state.abb[match(corp_rates$state, state.name)]
+```
+
+```{r}
+leases <- leases %>%
+  mutate(market = ifelse(market == "Chicago Suburbs", "Chicago", market))
+```
+
+```{r}
+# join data
+data <- inner_join(leases, corp_rates, join_by(state))
+data <- inner_join(data, occupancy, by = c("market" = "market", "year" = "year", "quarter" = "quarter"))
+data <- inner_join(data, qual, by= c("year"="year", "quarter"="quarter", "market"="market"))
+
+unique(data$market)
+```
+
+```{r}
+# Check duplicates in the leases dataframe
+duplicates_leases <- leases %>%
+  group_by(year, quarter, market) %>%
+  filter(n() > 1)
+
+# Check duplicates in the occupancy dataframe
+duplicates_occupancy <- occupancy %>%
+  group_by(year, quarter, market) %>%
+  filter(n() > 1)
+
+print(duplicates_leases)
+print(duplicates_occupancy)
+```
+
+```{r}
+nrow(data)
+```
+
+```{r}
+dummies <- dummyVars(~ internal_industry, data = data)
+encoded <- predict(dummies, newdata = data)
+data <- cbind(data, encoded)
+```
+
+```{r}
+data <- data %>%
+  mutate(across(
+    starts_with("toprate"),
+    ~ as.numeric(gsub("%", "", .)) / 100
+  ))
+```
+
+```{r}
+sapply(data[, c(
+  "ending_occupancy_proportion",
+  "starting_occupancy_proportion",
+  "avg_occupancy_proportion",
+  "overall_rent",
+  "toprate21",
+  "toprate22",
+  "toprate23",
+  "toprate24",
+  "high_qual_percentage"
+)], class)
+```
+
+```{r}
+data_scaled <- data %>%
+  select(
+    ending_occupancy_proportion,
+    starting_occupancy_proportion,
+    avg_occupancy_proportion,
+    overall_rent,
+    toprate21,
+    toprate22,
+    toprate23,
+    toprate24,
+    high_qual_percentage
+  ) %>%
+  scale() %>%
+  as_tibble()
+```
+
+```{r}
+data <- na.omit(data_scaled)
+nrow(data_scaled)
+```
+
+```{r}
+km <- kmeans(data_scaled, centers = 3, nstart = 10)
+```
+
+```{r}
+ggplot(pivot_longer(as_tibble(km$centers,  rownames = "cluster"), 
+  cols = colnames(km$centers)), 
+  aes(y = name, x = value, fill = cluster)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(cluster)) +
+  labs(y = "feature", x = "z-scores", title = "Cluster Profiles") + 
+  guides(fill="none")
+```
