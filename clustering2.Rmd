@@ -1,0 +1,227 @@
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(caret)
+```
+
+```{r}
+leases <- read_csv("Leases_WithDates_FixedNA.csv")
+```
+
+```{r}
+summary(leases)
+```
+
+```{r}
+occupancy <- read.csv("MajorMarketOccupancyData-revised.csv")
+corp_rates <- read.csv("CorpRates.csv")
+qual <- read.csv("High_Qual_Percentage.csv")
+```
+
+```{r}
+names(corp_rates) <- tolower(names(corp_rates))
+names(qual) <- tolower(names(qual))
+
+corp_rates$state <- state.abb[match(corp_rates$state, state.name)]
+```
+
+```{r}
+leases <- leases %>%
+  mutate(market = ifelse(market == "Chicago Suburbs", "Chicago", market))
+```
+
+```{r}
+# join data
+data <- inner_join(leases, corp_rates, by = c("year" = "year", "state" = "state"))
+#data <- inner_join(data, occupancy, by = c("market" = "market", "year" = "year", "quarter" = "quarter"))
+data <- inner_join(data, qual, by= c("year"="year", "quarter"="quarter", "market"="market"))
+
+unique(data$market)
+```
+
+
+```{r}
+# Check duplicates in the leases dataframe
+duplicates_leases <- leases %>%
+  group_by(year, quarter, market) %>%
+  filter(n() > 1)
+
+# Check duplicates in the occupancy dataframe
+duplicates_occupancy <- occupancy %>%
+  group_by(year, quarter, market) %>%
+  filter(n() > 1)
+
+print(duplicates_leases)
+print(duplicates_occupancy)
+```
+
+```{r}
+nrow(data)
+```
+
+```{r}
+dummies <- dummyVars(~ internal_industry, data = data)
+encoded <- predict(dummies, newdata = data)
+data <- cbind(data, encoded)
+
+# Make column names unique
+#colnames(data) <- make.unique(colnames(data))
+```
+
+```{r}
+data <- data %>%
+  mutate(rates = as.numeric(gsub("%", "", rates)) / 100)
+```
+
+```{r}
+sapply(data[, c(
+  #"ending_occupancy_proportion",
+ # "starting_occupancy_proportion",
+  #"avg_occupancy_proportion",
+  "overall_rent",
+  "rates",
+  "high_qual_percentage"
+)], class)
+```
+
+```{r}
+market_quarter_summary <- data %>%
+  group_by(market, year, quarter) %>%
+  summarise(
+    overall_rent = mean(overall_rent, na.rm = TRUE),
+    rates = mean(rates, na.rm = TRUE),
+    high_qual_percentage = mean(high_qual_percentage, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+market_quarter_scaled <- market_quarter_summary %>%
+  select(overall_rent, rates, high_qual_percentage) %>%
+  scale() %>%
+  as_tibble()
+
+# Step 3: Run K-means clustering
+km_mq <- kmeans(market_quarter_scaled, centers = 4, nstart = 10)
+
+# Step 4: Add cluster labels back to the summary data
+market_quarter_clusters <- market_quarter_summary %>%
+  mutate(cluster = km_mq$cluster)
+
+# View result
+colnames(km_mq$centers)
+```
+
+```{r}
+library(cluster)
+
+# Calculate silhouette scores for a range of cluster numbers
+sil_width <- sapply(2:10, function(k) {
+  km <- kmeans(market_quarter_scaled, centers = k, nstart = 10)
+  sil <- silhouette(km$cluster, dist(market_quarter_scaled))
+  mean(sil[, 3])
+})
+
+# Plot silhouette scores
+ggplot(data.frame(k = 2:10, silhouette_score = sil_width), aes(x = k, y = silhouette_score)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Silhouette Method for Optimal Clusters", x = "Number of Clusters", y = "Average Silhouette Score") +
+  theme_minimal()
+```
+
+```{r}
+library(ggplot2)
+
+# Calculate the within-cluster sum of squares (WSS) for a range of cluster numbers
+wss <- sapply(1:10, function(k) {
+  kmeans(market_quarter_scaled, centers = k, nstart = 10)$tot.withinss
+})
+
+# Create a plot
+ggplot(data.frame(k = 1:10, wss = wss), aes(x = k, y = wss)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Elbow Method for Optimal Clusters", x = "Number of Clusters", y = "Within-Cluster Sum of Squares") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(pivot_longer(as_tibble(km_mq$centers,  rownames = "cluster"), 
+  cols = colnames(km_mq$centers)), 
+  aes(y = name, x = value, fill = cluster)) +
+  geom_bar(stat = "identity") +
+  facet_grid(cols = vars(cluster)) +
+  labs(y = "feature", x = "z-scores", title = "Cluster Profiles") + 
+  guides(fill="none")
+```
+
+
+```{r}
+# Box plot of overall_rent for each cluster
+ggplot(market_quarter_clusters, aes(x = factor(cluster), y = overall_rent, fill = factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Overall Rent by Cluster",
+       x = "Cluster",
+       y = "Overall Rent") +
+  scale_x_discrete(labels = c("1", "2", "3", "4", "5", "6", "7")) +  # Optional: Customize labels for clusters
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove legend for clarity
+```
+
+
+```{r}
+# Box plot of overall_rent for each cluster
+ggplot(market_quarter_clusters, aes(x = factor(cluster), y = rates, fill = factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Overall Rent by Cluster",
+       x = "Cluster",
+       y = "Corporate Tax Rates") +
+  scale_x_discrete(labels = c("1", "2", "3", "4", "5", "6", "7")) +  # Optional: Customize labels for clusters
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove legend for clarity
+```
+
+
+```{r}
+# Box plot of overall_rent for each cluster
+ggplot(market_quarter_clusters, aes(x = factor(cluster), y = high_qual_percentage, fill = factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Overall Rent by Cluster",
+       x = "Cluster",
+       y = "Percentage of Leasable SF Considered High-Quality") +
+  scale_x_discrete(labels = c("1", "2", "3", "4", "5", "6", "7")) +  # Optional: Customize labels for clusters
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove legend for clarity
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Create a new variable combining year and quarter
+market_quarter_clusters <- market_quarter_clusters %>%
+  mutate(year_quarter = paste(year, quarter, sep = "-"))
+
+# Ensure 'year_quarter' is ordered correctly
+market_quarter_clusters <- market_quarter_clusters %>%
+  mutate(year_quarter = factor(year_quarter, levels = unique(year_quarter)))
+
+# Plot with the combined 'year_quarter' variable and no x-axis label
+ggplot(market_quarter_clusters, aes(x = year_quarter, y = cluster)) +
+  geom_line(aes(group = market)) +
+  geom_point() +
+  facet_wrap(~ market) +
+  scale_y_continuous(breaks = 1:7) +  # Adjust cluster range if necessary
+  labs(title = "Cluster Assignments Over Time by Market", y = "Cluster", x = "Quarter and Year") + 
+  theme_minimal() +
+  theme(axis.text.x = element_blank()) 
+
+```
+
+```{r}
+print(market_quarter_clusters)
+```
+```
